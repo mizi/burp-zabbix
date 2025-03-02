@@ -5,14 +5,13 @@ CRON=false
 #CLIENTDIR="/etc/burp/clientconfdir"
 
 function BurpCreateList {
-
-# create new list every 1hours, not every time this script runs. querying burp takes a while, so maybe move this task as cronjob if causing issues or incorrect data.
-if [ ! -s /etc/zabbix/burp_list.txt ] || [$(find /etc/zabbix -type f -name "burp_list.txt" -mmin +60) ] && [ ! -f /etc/zabbix/burp_list.lock ]; then
-	touch /etc/zabbix/burp_list.lock
-	stdbuf -oL -- burp -a S | grep "^   " | sed 's/^ *//' > /etc/zabbix/burp_list.tmp && \
-	rm -f /etc/zabbix/burp_list.lock || { rm -f /etc/zabbix/burp_list.lock ; exit 1; }
-	mv -f /etc/zabbix/burp_list.tmp /etc/zabbix/burp_list.txt
-fi
+	# create new list every 1hours, not every time this script runs. querying burp takes a while, so maybe move this task as cronjob if causing issues or incorrect data.
+	if [ ! -s /etc/zabbix/burp_list.txt ] || [ $(find /etc/zabbix -type f -name "burp_list.txt" -mmin +60) ] && [ ! -f /etc/zabbix/burp_list.lock ]; then
+        	touch /etc/zabbix/burp_list.lock
+		stdbuf -oL -- burp -a S | grep "^   " | sed 's/^ *//' > /etc/zabbix/burp_list.tmp && \
+			rm -f /etc/zabbix/burp_list.lock || { rm -f /etc/zabbix/burp_list.lock ; exit 1; }
+		mv -f /etc/zabbix/burp_list.tmp /etc/zabbix/burp_list.txt
+	fi
 }
 
 # create new list of clients/backups if doesn't exist/is empty. might cause zabbix to timeout since querying burp can take a while.
@@ -23,71 +22,72 @@ fi
 burp_list=$(cat /etc/zabbix/burp_list.txt)
 
 function BurpDiscover {
+	IFS=$'\n' read -r -d '' -a burp_clients <<< "$(echo "$burp_list" | awk '{print $1}')"
 
-IFS=$'\n' read -r -d '' -a burp_clients <<< "$(echo "$burp_list" | awk '{print $1}')"
+	echo -e "{\n"
+	echo -e "\"data\":[\n"
 
-echo -e "{\n"
-echo -e "\"data\":[\n"
-
-for burp_client in "${burp_clients[@]}"; do
-	# don't discover clients created less than 24hours ago
-	if [[ $CLIENTDIR ]]; then
-		if [[ $(find $CLIENTDIR -mindepth 1 -maxdepth 1 -ctime +1 -name "$burp_client") ]]; then
+	for burp_client in "${burp_clients[@]}"; do
+		# don't discover clients created less than 24hours ago
+		if [[ $CLIENTDIR ]]; then
+			if [[ $(find $CLIENTDIR -mindepth 1 -maxdepth 1 -ctime +1 -name "$burp_client") ]]; then
+				RESULT+=$(echo -e "\n{\n\"{#BURPCLIENT}\": \"$burp_client\"\n},")
+			fi
+		else
 			RESULT+=$(echo -e "\n{\n\"{#BURPCLIENT}\": \"$burp_client\"\n},")
 		fi
-	else
-		RESULT+=$(echo -e "\n{\n\"{#BURPCLIENT}\": \"$burp_client\"\n},")
-	fi
-done
+	done
 
-JSON=$(echo "$RESULT" | sed '$s/,$//')
+	JSON=$(echo "$RESULT" | sed '$s/,$//')
 
-echo "$JSON"
-echo "]}"
-
+	echo "$JSON"
+	echo "]}"
 }
+
 
 function BurpClientCheck {
+	client="$1"
 
-client="$1"
+	# if latest backup status is null/empty print negative number and exit
+	if [[ $(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6}') == "never" ]] || [[ $(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6}') == "" ]]; then
+		echo "0"
+		exit
+	fi
 
-# if latest backup status is null/empty print negative number and exit
-if [[ $(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6}') == "never" ]] || [[ $(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6}') == "" ]]; then
-	echo "0"
-	exit
-fi
+	# else proceed with finding out the exact timestamp
+	backup_data=$(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6,$7,$8}')
 
-# else proceed with finding out the exact timestamp
-backup_data=$(echo "$burp_list" | awk -v c="^$client$" '$1 ~ c' | awk '{print $6,$7,$8}')
-
-backup_time=$(date -d "$backup_data" +"%s")
-current_time=$(date +"%s")
-echo "$(( $current_time - $backup_time ))"
-
+	backup_time=$(date -d "$backup_data" +"%s")
+	current_time=$(date +"%s")
+	echo "$(( $current_time - $backup_time ))"
 }
 
-case "$1" in
 
+case "$1" in
 	discover)
-	BurpDiscover
-	# execute create list afterwards and leave to background as this might timeout zabbix check
-	if [ "$CRON" == "false" ]; then
-		BurpCreateList &
-	fi
-	exit 0;
+		BurpDiscover
+		# execute create list afterwards and leave to background as this might timeout zabbix check
+		if [ "$CRON" == "false" ]; then
+			BurpCreateList &
+		fi
+		exit 0;
 	;;
+
 	check)
-	BurpClientCheck $2
-	 # execute create list afterwards and leave to background as this might timeout zabbix check
-	if [ "$CRON" == "false" ]; then
-	 	BurpCreateList &
-	fi
-	exit 0
+		BurpClientCheck $2
+		# execute create list afterwards and leave to background as this might timeout zabbix check
+		if [ "$CRON" == "false" ]; then
+	 		BurpCreateList &
+		fi
+		exit 0
 	;;
+
 	cron)
-	BurpCreateList
+		BurpCreateList
 	;;
+
 	*)
-	exit 0
+		exit 0
 	;;
-esac 
+esac
+
